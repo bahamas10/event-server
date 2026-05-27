@@ -1,3 +1,12 @@
+/*!
+ * Basic syslog-inspired event server service
+ *
+ * Author: Dave Eddy <ysap@daveeddy.com>
+ * Date: May 27, 2026
+ * License: MIT
+ */
+
+use std::collections::VecDeque;
 use std::sync::{Arc, RwLock};
 
 use axum::{
@@ -6,44 +15,31 @@ use axum::{
     response::Json,
     routing::{get, post},
 };
-use serde::{Deserialize, Serialize};
-use serde_json::Value as SerdeValue;
+use serde::Deserialize;
+use serde_json::Value as JsonValue;
 use time::UtcDateTime;
 use uuid::Uuid;
+
+use event_server::{Event, EventLevel};
 
 /// Shared state for every incoming request
 #[derive(Clone)]
 struct AppState {
-    events: Arc<RwLock<Vec<Event>>>,
+    config: Config,
+    events: Arc<RwLock<VecDeque<Event>>>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(rename_all = "lowercase")]
-enum EventLevel {
-    Trace,
-    Debug,
-    Info,
-    Warn,
-    Critical,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-struct Event {
-    pub id: Uuid,
-    pub created: UtcDateTime,
-    pub message: String,
-    pub level: EventLevel,
-    /*
-     * TODO
-    pub component: String, "nginx"
-    pub data: JsonValue, "arbitrary data"
-    */
+#[derive(Clone)]
+struct Config {
+    max_events: usize,
 }
 
 #[derive(Deserialize, Debug)]
 struct CreateEventPayload {
-    pub message: String,
+    pub component: String,
     pub level: EventLevel,
+    pub message: String,
+    pub data: Option<JsonValue>,
 }
 
 /// POST /events
@@ -52,19 +48,30 @@ async fn post_events(
     Json(payload): Json<CreateEventPayload>,
 ) -> Json<Event> {
     let ts = UtcDateTime::now();
+    let id = Uuid::new_v7(uuid::Timestamp::from_unix(
+        uuid::timestamp::context::NoContext,
+        ts.unix_timestamp() as u64,
+        ts.nanosecond(),
+    ));
+
     let event = Event {
-        //id: Uuid::new_v7(ts), TODO: re-use the same timestamp
-        id: Uuid::now_v7(),
+        id,
         created: ts,
+        component: payload.component,
         message: payload.message,
         level: payload.level,
+        data: payload.data.unwrap_or_default(),
     };
 
-    // write the event to our internal ring buffer ... TODO make this a ring
-    // buffer
+    // write the event to our internal ring buffer
     {
         let mut events = state.events.write().expect("failed to acquire lock");
-        events.push(event.clone());
+        events.push_back(event.clone());
+
+        // shrink the ring buffer here if it is too big
+        while events.len() > state.config.max_events {
+            let _ = events.pop_front();
+        }
     }
 
     // TODO: dispatch this new event to exec queue (need a broadcast stream
@@ -80,11 +87,11 @@ async fn get_events(State(state): State<AppState>) -> Json<Vec<Event>> {
         events.clone()
     };
 
-    Json(events)
+    Json(events.into())
 }
 
 /// GET /ping
-async fn get_ping(State(_state): State<AppState>) -> Json<SerdeValue> {
+async fn get_ping(State(_state): State<AppState>) -> Json<JsonValue> {
     println!("index handler hit");
 
     Json(serde_json::json!("pong"))
@@ -98,9 +105,14 @@ async fn get_event_stream(State(_state): State<AppState>) {
 
 #[tokio::main]
 async fn main() {
+    // TODO: make this config / CLI args?
     let listen = "127.0.0.1:3000";
+    let config = Config { max_events: 5 };
 
-    let shared_state = AppState { events: Arc::new(RwLock::new(vec![])) };
+    // TODO: wrap this data type and have it encapsulate the max size
+    let events = VecDeque::new();
+    let shared_state =
+        AppState { events: Arc::new(RwLock::new(events)), config };
 
     let app = Router::new()
         .route("/ping", get(get_ping))
