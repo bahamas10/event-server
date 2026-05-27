@@ -1,84 +1,109 @@
+use std::sync::{Arc, RwLock};
+
 use axum::{
     Router,
     extract::State,
     response::Json,
     routing::{get, post},
 };
-use std::sync::{Arc, RwLock};
+use serde::{Deserialize, Serialize};
 use serde_json::Value as SerdeValue;
+use time::UtcDateTime;
+use uuid::Uuid;
 
+/// Shared state for every incoming request
 #[derive(Clone)]
 struct AppState {
     events: Arc<RwLock<Vec<Event>>>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Debug)]
-struct Event {
-    pub message: String,
-    pub level: String,
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "lowercase")]
+enum EventLevel {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Critical,
 }
 
-#[derive(serde::Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct Event {
+    pub id: Uuid,
+    pub created: UtcDateTime,
+    pub message: String,
+    pub level: EventLevel,
+    /*
+     * TODO
+    pub component: String, "nginx"
+    pub data: JsonValue, "arbitrary data"
+    */
+}
+
+#[derive(Deserialize, Debug)]
 struct CreateEventPayload {
     pub message: String,
-    pub level: String,
+    pub level: EventLevel,
 }
 
 /// POST /events
 async fn post_events(
     State(state): State<AppState>,
-    Json(payload): Json<CreateEventPayload>
-) -> String {
+    Json(payload): Json<CreateEventPayload>,
+) -> Json<Event> {
+    let ts = UtcDateTime::now();
     let event = Event {
+        //id: Uuid::new_v7(ts), TODO: re-use the same timestamp
+        id: Uuid::now_v7(),
+        created: ts,
         message: payload.message,
         level: payload.level,
-        // TODO: add a UUID field here and return it to the user
     };
 
     // write the event to our internal ring buffer ... TODO make this a ring
     // buffer
     {
         let mut events = state.events.write().expect("failed to acquire lock");
-        events.push(event);
+        events.push(event.clone());
     }
 
+    // TODO: dispatch this new event to exec queue (need a broadcast stream
+    // probably)
 
-    // TODO: dispatch this new event to exec queue
-
-    // TODO: Return the UUID
-    "UUID here lol".into()
+    Json(event)
 }
 
 /// GET /events
-async fn get_events(
-    State(state): State<AppState>,
-) -> String {
-    // TODO: this should probably not do the serialization here and return a
-    // string? or should it? idk lol.  maybe just set the content-type somehow.
+async fn get_events(State(state): State<AppState>) -> Json<Vec<Event>> {
+    let events = {
+        let events = state.events.read().expect("failed to acquire lock");
+        events.clone()
+    };
 
-    let events = state.events.read().expect("failed to acquire lock");
-    serde_json::to_string_pretty(&*events).expect("failed to serialize")
+    Json(events)
 }
 
-/// GET /
-async fn get_index(
-    State(_state): State<AppState>,
-) -> Json<SerdeValue> {
+/// GET /ping
+async fn get_ping(State(_state): State<AppState>) -> Json<SerdeValue> {
     println!("index handler hit");
 
-    Json(serde_json::json!({"name":"dave"}))
+    Json(serde_json::json!("pong"))
+}
+
+/// GET /event-stream
+#[allow(unused)]
+async fn get_event_stream(State(_state): State<AppState>) {
+    // TODO: return a stream of SSE somehow, connect a live stream
 }
 
 #[tokio::main]
 async fn main() {
     let listen = "127.0.0.1:3000";
 
-    let shared_state = AppState {
-        events: Arc::new(RwLock::new(vec![])),
-    };
+    let shared_state = AppState { events: Arc::new(RwLock::new(vec![])) };
 
     let app = Router::new()
-        .route("/", get(get_index))
+        .route("/ping", get(get_ping))
         .route("/events", get(get_events))
         .route("/events", post(post_events))
         .with_state(shared_state);
