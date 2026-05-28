@@ -7,17 +7,23 @@
  */
 
 use std::collections::VecDeque;
+use std::convert::Infallible;
 use std::sync::{Arc, RwLock};
 
 use axum::{
     Router,
     extract::State,
     response::Json,
+    response::sse::{Event as SseEvent, KeepAlive, Sse},
     routing::{get, post},
 };
+use futures_util::stream::Stream;
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use time::UtcDateTime;
+use tokio::sync::broadcast;
+use tokio_stream::StreamExt as _;
+use tokio_stream::wrappers::BroadcastStream;
 use uuid::Uuid;
 
 use event_server::{Event, EventLevel};
@@ -27,6 +33,7 @@ use event_server::{Event, EventLevel};
 struct AppState {
     config: Config,
     events: Arc<RwLock<VecDeque<Event>>>,
+    tx: broadcast::Sender<Event>,
 }
 
 #[derive(Clone)]
@@ -54,6 +61,7 @@ async fn post_events(
         ts.nanosecond(),
     ));
 
+    // create a new event
     let event = Event {
         id,
         created: ts,
@@ -74,9 +82,11 @@ async fn post_events(
         }
     }
 
-    // TODO: dispatch this new event to exec queue (need a broadcast stream
-    // probably)
+    // broadcast the new event exists
+    let n = state.tx.send(event.clone()).expect("failed to broadcast event");
+    println!("broadcasted new event to {} subscribers", n);
 
+    // return the event to the client
     Json(event)
 }
 
@@ -98,30 +108,53 @@ async fn get_ping(State(_state): State<AppState>) -> Json<JsonValue> {
 }
 
 /// GET /event-stream
-#[allow(unused)]
-async fn get_event_stream(State(_state): State<AppState>) {
-    // TODO: return a stream of SSE somehow, connect a live stream
+async fn get_event_stream(
+    State(state): State<AppState>,
+) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
+    // create a new event receiver
+    let rx = state.tx.subscribe();
+    let stream = BroadcastStream::new(rx).map(|e| {
+        let e = e.unwrap();
+        let foo =
+            SseEvent::default().id(e.id.to_string()).json_data(e).unwrap();
+        Ok(foo)
+    });
+
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> ! {
     // TODO: make this config / CLI args?
     let listen = "127.0.0.1:3000";
     let config = Config { max_events: 5 };
 
     // TODO: wrap this data type and have it encapsulate the max size
     let events = VecDeque::new();
+    let (tx, mut rx) = broadcast::channel(16); // TODO: 16? lol sure
     let shared_state =
-        AppState { events: Arc::new(RwLock::new(events)), config };
+        AppState { events: Arc::new(RwLock::new(events)), config, tx };
+
+    tokio::spawn(async move {
+        loop {
+            let event = rx.recv().await.unwrap();
+            println!("got event: {:?}", event);
+
+            // TODO: fork and exec when new event is seen (optionally)
+        }
+    });
 
     let app = Router::new()
         .route("/ping", get(get_ping))
         .route("/events", get(get_events))
         .route("/events", post(post_events))
+        .route("/event-stream", get(get_event_stream))
         .with_state(shared_state);
 
     // run our app with hyper, listening globally on port 3000
     let listener = tokio::net::TcpListener::bind(listen).await.unwrap();
     println!("Listening: http://{}", listen);
     axum::serve(listener, app).await.unwrap();
+
+    unreachable!("HTTP server died?!")
 }
