@@ -1,0 +1,17 @@
+# maximum number of events to allow
+max_events = 5
+
+# file to execute (if set) when a new event is seen
+exec_program = "./new-event"
+
+[persist]
+# this file (if set) will be read upon start-up, and written to whenever new
+# events are received
+file = "events.json"
+
+[http_server]
+listen = "localhost:3000"
+
+# you probably don't need to change these
+[internal]
+tokio_broadcast_channel_size = 16

@@ -6,8 +6,11 @@
  * License: MIT
  */
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
+use std::env;
+use std::fs;
+use std::process::Command;
 use std::sync::{Arc, RwLock};
 
 use axum::{
@@ -28,17 +31,15 @@ use uuid::Uuid;
 
 use event_server::{Event, EventLevel};
 
+mod config;
+use config::Config;
+
 /// Shared state for every incoming request
 #[derive(Clone)]
 struct AppState {
     config: Config,
     events: Arc<RwLock<VecDeque<Event>>>,
     tx: broadcast::Sender<Event>,
-}
-
-#[derive(Clone)]
-struct Config {
-    max_events: usize,
 }
 
 #[derive(Deserialize, Debug)]
@@ -115,9 +116,9 @@ async fn get_event_stream(
     let rx = state.tx.subscribe();
     let stream = BroadcastStream::new(rx).map(|e| {
         let e = e.unwrap();
-        let foo =
+        let event =
             SseEvent::default().id(e.id.to_string()).json_data(e).unwrap();
-        Ok(foo)
+        Ok(event)
     });
 
     Sse::new(stream).keep_alive(KeepAlive::default())
@@ -125,22 +126,84 @@ async fn get_event_stream(
 
 #[tokio::main]
 async fn main() -> ! {
-    // TODO: make this config / CLI args?
-    let listen = "127.0.0.1:3000";
-    let config = Config { max_events: 5 };
+    let config: Config = {
+        let s = fs::read_to_string("config.toml").unwrap();
+        toml::from_str(&s).unwrap()
+    };
+
+    println!("read config: {:#?}", config);
+
+    let events: VecDeque<Event> = {
+        if let Some(file) = &config.persist.file {
+            // JSON file specified in the config - read it
+            println!("reading cached events in {}", file);
+            let s = fs::read_to_string(file).unwrap();
+            serde_json::from_str(&s).unwrap()
+        } else {
+            // start with an empty cache
+            println!("persist file not set - not reading cached data");
+            VecDeque::new()
+        }
+    };
+
+    println!("have {} cached events", events.len());
 
     // TODO: wrap this data type and have it encapsulate the max size
-    let events = VecDeque::new();
-    let (tx, mut rx) = broadcast::channel(16); // TODO: 16? lol sure
+    let (tx, mut rx) =
+        broadcast::channel(config.internal.tokio_broadcast_channel_size);
+    let events = Arc::new(RwLock::new(events));
     let shared_state =
-        AppState { events: Arc::new(RwLock::new(events)), config, tx };
+        AppState { events: events.clone(), config: config.clone(), tx };
 
     tokio::spawn(async move {
+        // potentially break this into 2 separate tasks
         loop {
             let event = rx.recv().await.unwrap();
             println!("got event: {:?}", event);
 
-            // TODO: fork and exec when new event is seen (optionally)
+            // serialize the events to disk if set
+            if let Some(file) = &config.persist.file {
+                let s = {
+                    let items = events.read().unwrap();
+                    serde_json::to_string(&*items).unwrap()
+                };
+                fs::write(file, s).unwrap();
+                println!("serialized events to {}", file);
+            }
+
+            // fork and exec when new event is seen
+            if let Some(prog) = &config.exec_program {
+                // TODO: put this in a function so we can early return
+                println!("exec: {}", prog);
+
+                // TODO: just do this once at program start
+                let mut env: HashMap<String, String> = env::vars()
+                    .filter(|(k, _)| {
+                        k == "TERM" || k == "TZ" || k == "LANG" || k == "PATH"
+                    })
+                    .collect();
+
+                env.insert("EVENT_ID".into(), event.id.to_string());
+                env.insert("EVENT_COMPONENT".into(), event.component);
+                env.insert("EVENT_LEVEL".into(), format!("{:?}", event.level)); // TODO not this
+                // lol
+                env.insert("EVENT_MESSAGE".into(), event.message);
+                env.insert("EVENT_DATA".into(), event.data.to_string());
+
+                let output =
+                    match Command::new(prog).env_clear().envs(&env).output() {
+                        Ok(s) => s,
+                        Err(e) => {
+                            eprintln!("failed to run: {}", prog);
+                            eprintln!("{:#?}", e);
+                            continue;
+                        }
+                    };
+
+                println!("exec (finish): {}", prog);
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                println!("{}", stdout);
+            }
         }
     });
 
@@ -151,9 +214,10 @@ async fn main() -> ! {
         .route("/event-stream", get(get_event_stream))
         .with_state(shared_state);
 
-    // run our app with hyper, listening globally on port 3000
-    let listener = tokio::net::TcpListener::bind(listen).await.unwrap();
-    println!("Listening: http://{}", listen);
+    let listener = tokio::net::TcpListener::bind(&config.http_server.listen)
+        .await
+        .unwrap();
+    println!("Listening: http://{}", config.http_server.listen);
     axum::serve(listener, app).await.unwrap();
 
     unreachable!("HTTP server died?!")
