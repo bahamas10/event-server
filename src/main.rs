@@ -188,7 +188,8 @@ async fn execute_program_task(
 async fn main() -> Result<()> {
     // read config
     let config: Config = {
-        let s = fs::read_to_string("config.toml").context("failed to read config")?;
+        let s = fs::read_to_string("config.toml")
+            .context("failed to read config")?;
         toml::from_str(&s).context("failed to parse config toml")?
     };
     println!("read config: {:#?}", config);
@@ -198,8 +199,10 @@ async fn main() -> Result<()> {
         if let Some(file) = &config.persist.file {
             // JSON file specified in the config - read it
             println!("reading cached events in {}", file);
-            let s = fs::read_to_string(file).context("failed to read cached events")?;
-            serde_json::from_str(&s).context("failed to parse cached events as JSON")?
+            let s = fs::read_to_string(file)
+                .context("failed to read cached events")?;
+            serde_json::from_str(&s)
+                .context("failed to parse cached events as JSON")?
         } else {
             // start with an empty cache
             println!("persist file not set - not reading cached data");
@@ -236,8 +239,8 @@ async fn main() -> Result<()> {
         .with_state(shared_state);
 
     // start the webserver and block forever
-    let listener = tokio::net::TcpListener::bind(&config.http_server.listen)
-        .await?;
+    let listener =
+        tokio::net::TcpListener::bind(&config.http_server.listen).await?;
     println!("listening: http://{}", config.http_server.listen);
     axum::serve(listener, app).await?;
 

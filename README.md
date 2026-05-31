@@ -4,8 +4,11 @@
 TODO
 ----
 
-- CLI support POSTing (creating) events
+- CLI support GETing event-stream
+- event stream supporting backlog of events
 - good logging
+- better & consistent naming - should this tool have its own name?
+- (maybe) log events to a single file as newline-separated JSON
 
 Concerns
 --------
@@ -18,3 +21,11 @@ Possible TODO
 
 - reload config
 - optional datastores
+
+Usage
+-----
+
+```
+$ cli tail [-f]
+$ cli create [--component=CLI] [--level=info] 'message here'
+```
