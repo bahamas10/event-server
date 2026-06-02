@@ -1,34 +1,43 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use gethostname::gethostname;
 
-use event_server::Event;
+use event_server::{EmitEventPayload, Event, EventLevel};
 
 /// Dave's Event Server CLI Client
 #[derive(Debug, Parser)]
 #[command(version, about, long_about = None)]
 struct Args {
+    /// Event daemon url
+    #[arg(short, long, default_value = "http://localhost:3000")]
+    url: String,
+
     #[command(subcommand)]
     command: Commands,
 }
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    /// Create a new event
-    Create(CreateCommand),
+    /// Emit a new event
+    Emit(EmitCommand),
 
     /// View or stream recent events
     Tail(TailCommand),
 }
 
 #[derive(Debug, Parser)]
-struct CreateCommand {
+struct EmitCommand {
     /// Component name
     #[arg(short, long, default_value = "CLI")]
-    component: String,
+    source: String,
+
+    /// Hostname
+    #[arg(short = 'H', long)]
+    hostname: Option<String>,
 
     /// Severity level
-    #[arg(short, long, default_value = "info")]
-    level: String, // TODO this should use the libraries enum
+    #[arg(short, long, default_value_t = EventLevel::Info)]
+    level: EventLevel,
 
     /// Message data
     message: String,
@@ -37,14 +46,6 @@ struct CreateCommand {
 #[derive(Debug, Parser)]
 struct TailCommand {}
 
-// TODO: use the struct that is defined in the server code
-#[derive(serde::Serialize, Debug)]
-struct CreateEventPayload {
-    pub component: String,
-    pub level: String, // TODO: lmao
-    pub message: String,
-}
-
 /*
  * Todo List
  *
@@ -52,33 +53,38 @@ struct CreateEventPayload {
  *  - should this be a config file? env var? CLI arg? combo of all?
  */
 
-fn create_subcommand(cmd: CreateCommand) -> Result<()> {
-    let body = CreateEventPayload {
-        component: cmd.component,
-        level: cmd.level,
-        message: cmd.message,
+fn emit_subcommand(url: &str, cmd: EmitCommand) -> Result<()> {
+    // get hostname of system if not provided by the user
+    let hostname = match cmd.hostname {
+        Some(n) => n,
+        None => gethostname().into_string().expect("failed to gethostname"),
     };
 
-    let client = reqwest::blocking::Client::new();
-    let event: Event = client
-        .post("http://localhost:3000/events")
-        .json(&body)
-        .send()?
-        .json()?;
+    let body = EmitEventPayload {
+        hostname,
+        source: cmd.source,
+        level: cmd.level,
+        message: cmd.message,
+        data: None,
+    };
 
-    println!("created event!");
+    // TODO: clean this up
+    let url = format!("{}/events", url);
+    let client = reqwest::blocking::Client::new();
+    let event: Event = client.post(&url).json(&body).send()?.json()?;
+
+    println!("emited event!");
     println!("{:#?}", event);
 
     Ok(())
 }
 
-fn tail_subcommand(_cmd: TailCommand) -> Result<()> {
-    let events: Vec<Event> =
-        reqwest::blocking::get("http://localhost:3000/events")?.json()?;
+fn tail_subcommand(url: &str, _cmd: TailCommand) -> Result<()> {
+    let url = format!("{}/events", url);
+    let events: Vec<Event> = reqwest::blocking::get(&url)?.json()?;
 
     for event in events {
-        // TODO: event should implement Display
-        println!("{} [{:?}]: {}", event.component, event.level, event.message);
+        println!("{} [{}]: {}", event.source, event.level, event.message);
     }
 
     Ok(())
@@ -87,8 +93,10 @@ fn tail_subcommand(_cmd: TailCommand) -> Result<()> {
 fn main() -> Result<()> {
     let args = Args::parse();
 
+    let url = &args.url;
+
     match args.command {
-        Commands::Create(cmd) => create_subcommand(cmd),
-        Commands::Tail(cmd) => tail_subcommand(cmd),
+        Commands::Emit(cmd) => emit_subcommand(url, cmd),
+        Commands::Tail(cmd) => tail_subcommand(url, cmd),
     }
 }

@@ -13,7 +13,7 @@ use std::fs;
 use std::process::Command;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use axum::{
     Router,
     extract::State,
@@ -22,7 +22,6 @@ use axum::{
     routing::{get, post},
 };
 use futures_util::stream::Stream;
-use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use time::UtcDateTime;
 use tokio::sync::{RwLock, broadcast};
@@ -30,7 +29,7 @@ use tokio_stream::StreamExt as _;
 use tokio_stream::wrappers::BroadcastStream;
 use uuid::Uuid;
 
-use event_server::{Event, EventLevel};
+use event_server::{EmitEventPayload, Event};
 
 mod config;
 use config::Config;
@@ -43,18 +42,10 @@ struct AppState {
     tx: broadcast::Sender<Event>,
 }
 
-#[derive(Deserialize, Debug)]
-struct CreateEventPayload {
-    pub component: String,
-    pub level: EventLevel,
-    pub message: String,
-    pub data: Option<JsonValue>,
-}
-
 /// POST /events
 async fn post_events(
     State(state): State<AppState>,
-    Json(payload): Json<CreateEventPayload>,
+    Json(payload): Json<EmitEventPayload>,
 ) -> Json<Event> {
     let ts = UtcDateTime::now();
     let id = Uuid::new_v7(uuid::Timestamp::from_unix(
@@ -67,7 +58,8 @@ async fn post_events(
     let event = Event {
         id,
         created: ts,
-        component: payload.component,
+        hostname: payload.hostname,
+        source: payload.source,
         message: payload.message,
         level: payload.level,
         data: payload.data.unwrap_or_default(),
@@ -164,9 +156,9 @@ async fn execute_program_task(
 
         let mut env = env.clone();
         env.insert("EVENT_ID".into(), event.id.to_string());
-        env.insert("EVENT_COMPONENT".into(), event.component);
-        env.insert("EVENT_LEVEL".into(), format!("{:?}", event.level)); // TODO not this
-        // lol
+        env.insert("EVENT_SOURCE".into(), event.source);
+        env.insert("EVENT_HOSTNAME".into(), event.hostname);
+        env.insert("EVENT_LEVEL".into(), event.level.to_string());
         env.insert("EVENT_MESSAGE".into(), event.message);
         env.insert("EVENT_DATA".into(), event.data.to_string());
 
@@ -199,10 +191,21 @@ async fn main() -> Result<()> {
         if let Some(file) = &config.persist.file {
             // JSON file specified in the config - read it
             println!("reading cached events in {}", file);
-            let s = fs::read_to_string(file)
-                .context("failed to read cached events")?;
-            serde_json::from_str(&s)
-                .context("failed to parse cached events as JSON")?
+
+            match fs::read_to_string(file) {
+                Ok(s) => {
+                    println!("read {} - parsing as JSON", file);
+                    serde_json::from_str(&s)
+                        .context("failed to parse cached events as JSON")?
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    println!("file {} not found - using empty cache", file);
+                    VecDeque::new()
+                }
+                Err(e) => {
+                    bail!("failed to read cached events: {}", e);
+                }
+            }
         } else {
             // start with an empty cache
             println!("persist file not set - not reading cached data");

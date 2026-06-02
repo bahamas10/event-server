@@ -8,6 +8,8 @@ TODO
 - event stream supporting backlog of events
 - good logging
 - better & consistent naming - should this tool have its own name?
+- move code into cargo workspaces (maybe)
+  - separate client from server with shared library
 - (maybe) log events to a single file as newline-separated JSON
 
 Concerns
