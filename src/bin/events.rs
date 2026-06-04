@@ -1,6 +1,8 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use gethostname::gethostname;
+use reqwest_sse::EventSource;
+use tokio_stream::StreamExt;
 
 use event_server::{EmitEventPayload, Event, EventLevel};
 
@@ -53,7 +55,7 @@ struct TailCommand {}
  *  - should this be a config file? env var? CLI arg? combo of all?
  */
 
-fn emit_subcommand(url: &str, cmd: EmitCommand) -> Result<()> {
+async fn emit_subcommand(url: &str, cmd: EmitCommand) -> Result<()> {
     // get hostname of system if not provided by the user
     let hostname = match cmd.hostname {
         Some(n) => n,
@@ -70,8 +72,9 @@ fn emit_subcommand(url: &str, cmd: EmitCommand) -> Result<()> {
 
     // TODO: clean this up
     let url = format!("{}/events", url);
-    let client = reqwest::blocking::Client::new();
-    let event: Event = client.post(&url).json(&body).send()?.json()?;
+    let client = reqwest::Client::new();
+    let event: Event =
+        client.post(&url).json(&body).send().await?.json().await?;
 
     println!("emited event!");
     println!("{:#?}", event);
@@ -79,24 +82,33 @@ fn emit_subcommand(url: &str, cmd: EmitCommand) -> Result<()> {
     Ok(())
 }
 
-fn tail_subcommand(url: &str, _cmd: TailCommand) -> Result<()> {
-    let url = format!("{}/events", url);
-    let events: Vec<Event> = reqwest::blocking::get(&url)?.json()?;
+async fn tail_subcommand(url: &str, _cmd: TailCommand) -> Result<()> {
+    let url = format!("{}/event-stream", url);
 
-    for event in events {
+    let mut events = reqwest::get(&url)
+        .await
+        .context("failed to request URL")?
+        .events()
+        .await
+        .context("failed to parse response as SSE")?;
+
+    while let Some(Ok(event)) = events.next().await {
+        let event: Event = serde_json::from_str(&event.data)
+            .context("failed to parse JSON data")?;
         println!("{} [{}]: {}", event.source, event.level, event.message);
     }
 
     Ok(())
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let args = Args::parse();
 
     let url = &args.url;
 
     match args.command {
-        Commands::Emit(cmd) => emit_subcommand(url, cmd),
-        Commands::Tail(cmd) => tail_subcommand(url, cmd),
+        Commands::Emit(cmd) => emit_subcommand(url, cmd).await,
+        Commands::Tail(cmd) => tail_subcommand(url, cmd).await,
     }
 }

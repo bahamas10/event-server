@@ -21,7 +21,9 @@ use axum::{
     response::sse::{Event as SseEvent, KeepAlive, Sse},
     routing::{get, post},
 };
+use env_logger::Env;
 use futures_util::stream::Stream;
+use log::{debug, info, trace, warn};
 use serde_json::Value as JsonValue;
 use time::UtcDateTime;
 use tokio::sync::{RwLock, broadcast};
@@ -47,6 +49,8 @@ async fn post_events(
     State(state): State<AppState>,
     Json(payload): Json<EmitEventPayload>,
 ) -> Json<Event> {
+    trace!("POST /events");
+
     let ts = UtcDateTime::now();
     let id = Uuid::new_v7(uuid::Timestamp::from_unix(
         uuid::timestamp::context::NoContext,
@@ -78,7 +82,7 @@ async fn post_events(
 
     // broadcast the new event exists
     let n = state.tx.send(event.clone()).expect("failed to broadcast event");
-    println!("broadcasted new event to {} subscribers", n);
+    trace!("broadcasted new event to {} subscribers", n);
 
     // return the event to the client
     Json(event)
@@ -86,6 +90,8 @@ async fn post_events(
 
 /// GET /events
 async fn get_events(State(state): State<AppState>) -> Json<Vec<Event>> {
+    trace!("GET /events");
+
     let events = {
         let events = state.events.read().await;
         events.clone()
@@ -96,7 +102,7 @@ async fn get_events(State(state): State<AppState>) -> Json<Vec<Event>> {
 
 /// GET /ping
 async fn get_ping(State(_state): State<AppState>) -> Json<JsonValue> {
-    println!("index handler hit");
+    trace!("GET /");
 
     Json(serde_json::json!("pong"))
 }
@@ -105,7 +111,23 @@ async fn get_ping(State(_state): State<AppState>) -> Json<JsonValue> {
 async fn get_event_stream(
     State(state): State<AppState>,
 ) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
-    // create a new event receiver
+    trace!("GET /event-stream");
+
+    // first, send all of the backed up events we have
+    let events = {
+        let events = state.events.read().await;
+        events.clone()
+    };
+    for e in events {
+        // TODO actually make this work
+        let _event =
+            SseEvent::default().id(e.id.to_string()).json_data(e).unwrap();
+    }
+
+    // TODO: keep track of the UUIDs of events we have seen to ensure they
+    // aren't duplicated
+
+    // second, subscribe to the new events channel and forward those along
     let rx = state.tx.subscribe();
     let stream = BroadcastStream::new(rx).map(|e| {
         let e = e.unwrap();
@@ -122,7 +144,8 @@ async fn persist_file_task(
     file: String,
     events: Arc<RwLock<VecDeque<Event>>>,
 ) -> ! {
-    println!("[persist-task] started");
+    trace!("[persist-task] started");
+
     loop {
         let _event =
             rx.recv().await.expect("[persist-task] failed to receive event");
@@ -134,7 +157,9 @@ async fn persist_file_task(
                 .expect("failed to JSON stringify events")
         };
         fs::write(&file, s).expect("failed to serialize data to disk");
-        println!("[persist-task] serialized events to {}", file);
+        debug!("[persist-task] serialized events to {}", file);
+
+        // TODO: panic this task and see what the main program does
     }
 }
 
@@ -142,7 +167,7 @@ async fn execute_program_task(
     mut rx: broadcast::Receiver<Event>,
     prog: String,
 ) -> ! {
-    println!("[exec-task] started");
+    trace!("[exec-task] started");
 
     let env: HashMap<String, String> = env::vars()
         .filter(|(k, _)| k == "TERM" || k == "TZ" || k == "LANG" || k == "PATH")
@@ -152,7 +177,7 @@ async fn execute_program_task(
         let event =
             rx.recv().await.expect("[exec-task] failed to receive event");
 
-        println!("[exec-task] {}", prog);
+        debug!("[exec-task] {}", prog);
 
         let mut env = env.clone();
         env.insert("EVENT_ID".into(), event.id.to_string());
@@ -165,14 +190,17 @@ async fn execute_program_task(
         let output = match Command::new(&prog).env_clear().envs(&env).output() {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("failed to run: {}", prog);
-                eprintln!("{:#?}", e);
+                warn!("failed to run: {}", prog);
+                warn!("{:#?}", e);
                 continue;
             }
         };
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        println!("[exec-task] (finish): {}\n{}", prog, stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        debug!("[exec-task] (finish): {}", prog);
+        debug!("stdout: {}", stdout);
+        debug!("stderr: {}", stderr);
     }
 }
 
@@ -184,22 +212,27 @@ async fn main() -> Result<()> {
             .context("failed to read config")?;
         toml::from_str(&s).context("failed to parse config toml")?
     };
-    println!("read config: {:#?}", config);
+    env_logger::Builder::from_env(
+        Env::default().default_filter_or(&config.log_level),
+    )
+    .init();
+
+    info!("read config: {:#?}", config);
 
     // initalize events
     let events: VecDeque<Event> = {
         if let Some(file) = &config.persist.file {
             // JSON file specified in the config - read it
-            println!("reading cached events in {}", file);
+            debug!("reading cached events in {}", file);
 
             match fs::read_to_string(file) {
                 Ok(s) => {
-                    println!("read {} - parsing as JSON", file);
+                    debug!("read {} - parsing as JSON", file);
                     serde_json::from_str(&s)
                         .context("failed to parse cached events as JSON")?
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    println!("file {} not found - using empty cache", file);
+                    warn!("file {} not found - using empty cache", file);
                     VecDeque::new()
                 }
                 Err(e) => {
@@ -208,11 +241,11 @@ async fn main() -> Result<()> {
             }
         } else {
             // start with an empty cache
-            println!("persist file not set - not reading cached data");
+            debug!("persist file not set - not reading cached data");
             VecDeque::new()
         }
     };
-    println!("have {} cached events", events.len());
+    info!("have {} cached events", events.len());
 
     // create the broadcast channel to keep track of events internally
     let (tx, _rx) =
@@ -244,7 +277,7 @@ async fn main() -> Result<()> {
     // start the webserver and block forever
     let listener =
         tokio::net::TcpListener::bind(&config.http_server.listen).await?;
-    println!("listening: http://{}", config.http_server.listen);
+    info!("listening: http://{}", config.http_server.listen);
     axum::serve(listener, app).await?;
 
     unreachable!("HTTP server died?!")

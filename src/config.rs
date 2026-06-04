@@ -4,6 +4,7 @@ use serde::Deserialize;
 pub struct Config {
     pub max_events: usize,
     pub exec_program: Option<String>,
+    pub log_level: String,
     pub persist: PersistConfig,
     pub http_server: HttpServerConfig,
     pub internal: InternalConfig,

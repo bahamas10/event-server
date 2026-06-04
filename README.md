@@ -4,9 +4,8 @@
 TODO
 ----
 
-- CLI support GETing event-stream
+- better format events for the CLI (color?)
 - event stream supporting backlog of events
-- good logging
 - better & consistent naming - should this tool have its own name?
 - move code into cargo workspaces (maybe)
   - separate client from server with shared library
@@ -17,6 +16,7 @@ Concerns
 
 - timeout command that gets executed on event
 - limit `POST` size
+- log level is silently discarded and logging is disabled if it is unknown
 
 Possible TODO
 --------------

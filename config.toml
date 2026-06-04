@@ -1,8 +1,12 @@
-# maximum number of events to allow
+# maximum number of events to store / retain in memory
 max_events = 5
 
 # file to execute (if set) when a new event is seen
 exec_program = "./new-event"
+
+# log level (given to the env_logger crate)
+# accepted values: off, error, warn, info, debug, trace
+log_level = "trace"
 
 [persist]
 # this file (if set) will be read upon start-up, and written to whenever new
